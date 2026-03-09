@@ -174,11 +174,15 @@ def _run_streaming(
             env=merged_env,
         ) as proc:
             assert proc.stdout is not None
-            for line in proc.stdout:
+            while True:
+                line = proc.stdout.readline()
+                if not line:
+                    break
                 if fh:
                     fh.write(line)
                 else:
                     sys.stdout.write(line)
+                    sys.stdout.flush()
         if proc.returncode != 0:
             raise subprocess.CalledProcessError(proc.returncode, cmd)
     finally:
@@ -244,7 +248,7 @@ def _available_ram_gb() -> float:
                 if line.startswith("MemAvailable:"):
                     kb = int(line.split()[1])
                     return kb / (1024 * 1024)
-    except (OSError, ValueError):
+    except (OSError, ValueError, IndexError):
         pass
     return 4.0
 
@@ -271,6 +275,7 @@ def compute_optimal_jobs() -> int:
 def extract_running_config(dest_dir: Path) -> Path:
     """Copy the running kernel config into *dest_dir*/.config."""
     version = get_running_kernel()
+    validate_input(version, "kernel version")
     boot_config = Path(f"/boot/config-{version}")
     proc_config = Path("/proc/config.gz")
     target = dest_dir / ".config"
@@ -293,16 +298,25 @@ def extract_running_config(dest_dir: Path) -> Path:
 # ---------------------------------------------------------------------------
 
 
+def _normalize_kernel_version(version: str) -> str:
+    """Strip trailing '.0' — kernel.org publishes '6.5' not '6.5.0'."""
+    if version.endswith(".0") and version.count(".") == 2:
+        return version[:-2]
+    return version
+
+
 def _kernel_url(version: str) -> str:
     """Build kernel.org download URL for *version*."""
     major = version.split(".")[0]
-    return f"{KERNEL_ORG_BASE}/v{major}.x/linux-{version}.tar.xz"
+    normalized = _normalize_kernel_version(version)
+    return f"{KERNEL_ORG_BASE}/v{major}.x/linux-{normalized}.tar.xz"
 
 
 def _kernel_sig_url(version: str) -> str:
     """Build kernel.org GPG signature URL for *version*."""
     major = version.split(".")[0]
-    return f"{KERNEL_ORG_BASE}/v{major}.x/linux-{version}.tar.sign"
+    normalized = _normalize_kernel_version(version)
+    return f"{KERNEL_ORG_BASE}/v{major}.x/linux-{normalized}.tar.sign"
 
 
 def fetch_latest_version() -> str:
@@ -317,6 +331,7 @@ def fetch_latest_version() -> str:
     with urlopen(req, timeout=30) as resp:  # noqa: S310
         data = json.loads(resp.read().decode())
     version: str = data["latest_stable"]["version"]
+    validate_input(version, "latest kernel version")
     log.info("Latest stable kernel: %s", version)
     return version
 
@@ -368,15 +383,31 @@ def safe_extract_tarball(tarball: Path, dest: Path) -> None:
     with tarfile.open(tarball) as tf:
         for member in tf.getmembers():
             member_path = (dest / member.name).resolve()
-            if not str(member_path).startswith(str(dest_resolved)):
-                raise ValidationError(f"Path traversal detected in tarball member: {member.name!r}")
+            try:
+                member_path.relative_to(dest_resolved)
+            except ValueError:
+                raise ValidationError(
+                    "Path traversal detected in tarball "
+                    f"member: {member.name!r}"
+                ) from None
             if member.issym() or member.islnk():
-                link_target = (dest / os.path.dirname(member.name) / member.linkname).resolve()
-                if not str(link_target).startswith(str(dest_resolved)):
+                link_target = (
+                    dest
+                    / os.path.dirname(member.name)
+                    / member.linkname
+                ).resolve()
+                try:
+                    link_target.relative_to(dest_resolved)
+                except ValueError:
                     raise ValidationError(
-                        f"Symlink traversal in tarball: {member.name!r} -> {member.linkname!r}"
-                    )
-        tf.extractall(dest, filter="data")  # noqa: S202
+                        "Symlink traversal in tarball: "
+                        f"{member.name!r} -> "
+                        f"{member.linkname!r}"
+                    ) from None
+        if sys.version_info >= (3, 12):
+            tf.extractall(dest, filter="data")  # noqa: S202
+        else:
+            tf.extractall(dest)  # noqa: S202
     log.info("Safely extracted %s", tarball.name)
 
 
@@ -387,7 +418,8 @@ def download_kernel(version: str, dest: Path) -> Path:
 
     url = _kernel_url(version)
     validate_url_domain(url)
-    tarball = dest / f"linux-{version}.tar.xz"
+    normalized = _normalize_kernel_version(version)
+    tarball = dest / f"linux-{normalized}.tar.xz"
 
     log.info("Downloading %s", url)
     run_cmd(
@@ -404,7 +436,7 @@ def download_kernel(version: str, dest: Path) -> Path:
 
     # GPG signature verification (best-effort)
     sig_url = _kernel_sig_url(version)
-    sig_path = dest / f"linux-{version}.tar.sign"
+    sig_path = dest / f"linux-{normalized}.tar.sign"
     sig_result = run_cmd(
         [
             "wget",
@@ -437,7 +469,7 @@ def download_kernel(version: str, dest: Path) -> Path:
     log.info("Extracting %s", tarball.name)
     safe_extract_tarball(tarball, dest)
 
-    source_dir = dest / f"linux-{version}"
+    source_dir = dest / f"linux-{normalized}"
     if not source_dir.is_dir():
         raise FileNotFoundError(f"Expected source directory not found: {source_dir}")
     return source_dir
@@ -447,6 +479,7 @@ def fetch_ubuntu_source(dest: Path) -> Path:
     """Fetch Ubuntu-patched kernel source."""
     dest.mkdir(parents=True, exist_ok=True)
     version = get_running_kernel()
+    validate_input(version, "kernel version")
 
     log.info("Fetching Ubuntu kernel source for %s", version)
     run_cmd(
@@ -666,9 +699,16 @@ def numbered_menu(title: str, options: list[str]) -> int:
             choice = int(raw)
             if 1 <= choice <= len(options):
                 return choice - 1
-        except (ValueError, EOFError):
+        except ValueError:
             pass
-        print(f"  Invalid choice — enter a number between 1 and {len(options)}")
+        except EOFError:
+            raise SystemExit(
+                "EOF received \u2014 aborting menu"
+            ) from None
+        print(
+            f"  Invalid choice \u2014 enter a number "
+            f"between 1 and {len(options)}"
+        )
 
 
 def prompt_yes_no(question: str) -> bool:

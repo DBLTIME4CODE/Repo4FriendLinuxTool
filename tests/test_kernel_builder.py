@@ -21,6 +21,7 @@ from myproject.kernel_builder import (
     _cpu_count,
     _kernel_sig_url,
     _kernel_url,
+    _normalize_kernel_version,
     build_deb_package,
     build_kernel,
     check_flash_kernel,
@@ -159,6 +160,33 @@ class TestKernelUrl:
     def test_sig_url(self) -> None:
         url = _kernel_sig_url("6.8.1")
         assert url == ("https://cdn.kernel.org/pub/linux/kernel/v6.x/linux-6.8.1.tar.sign")
+
+    def test_dot_zero_normalized(self) -> None:
+        url = _kernel_url("6.5.0")
+        assert url == ("https://cdn.kernel.org/pub/linux/kernel/v6.x/linux-6.5.tar.xz")
+
+    def test_dot_zero_sig_normalized(self) -> None:
+        url = _kernel_sig_url("6.5.0")
+        assert url == ("https://cdn.kernel.org/pub/linux/kernel/v6.x/linux-6.5.tar.sign")
+
+
+# ===================================================================
+# _normalize_kernel_version
+# ===================================================================
+
+
+class TestNormalizeKernelVersion:
+    def test_strips_trailing_zero(self) -> None:
+        assert _normalize_kernel_version("6.5.0") == "6.5"
+
+    def test_keeps_nonzero_patch(self) -> None:
+        assert _normalize_kernel_version("6.5.1") == "6.5.1"
+
+    def test_keeps_four_part(self) -> None:
+        assert _normalize_kernel_version("5.4.0.0") == "5.4.0.0"
+
+    def test_keeps_two_part(self) -> None:
+        assert _normalize_kernel_version("6.5") == "6.5"
 
 
 # ===================================================================
