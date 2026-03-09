@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import lzma
 import os
 import subprocess
 import tarfile
@@ -311,6 +312,43 @@ class TestDownloadKernel:
             match="Expected source directory",
         ):
             download_kernel("6.8.1", tmp_path)
+
+    @patch("myproject.kernel_builder.verify_gpg_signature")
+    @patch("myproject.kernel_builder.safe_extract_tarball")
+    @patch("myproject.kernel_builder.run_cmd")
+    def test_gpg_verifies_decompressed_tar(
+        self,
+        mock_cmd: MagicMock,
+        mock_extract: MagicMock,
+        mock_verify: MagicMock,
+        tmp_path: Path,
+    ) -> None:
+        """GPG verification must run against the .tar, not .tar.xz."""
+        # Create a real .tar.xz so lzma.open succeeds
+        tar_path = tmp_path / "linux-6.8.1.tar"
+        tar_path.write_bytes(b"fake tar content")
+        xz_path = tmp_path / "linux-6.8.1.tar.xz"
+        with lzma.open(xz_path, "wb") as f:
+            f.write(b"fake tar content")
+        tar_path.unlink()  # cleanup; download_kernel will recreate
+
+        # Simulate wget signature download succeeding
+        sig_path = tmp_path / "linux-6.8.1.tar.sign"
+        sig_path.write_bytes(b"fake sig")
+        mock_cmd.return_value = subprocess.CompletedProcess(args=[], returncode=0)
+        mock_verify.return_value = True
+
+        (tmp_path / "linux-6.8.1").mkdir()
+        download_kernel("6.8.1", tmp_path)
+
+        # Assert verify was called with .tar (not .tar.xz)
+        mock_verify.assert_called_once()
+        verified_path = mock_verify.call_args[0][0]
+        assert verified_path.suffix == ".tar"
+        assert verified_path.name == "linux-6.8.1.tar"
+
+        # .tar should be cleaned up after verification
+        assert not (tmp_path / "linux-6.8.1.tar").exists()
 
 
 # ===================================================================

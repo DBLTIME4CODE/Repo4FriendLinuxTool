@@ -11,6 +11,7 @@ import gzip
 import hashlib
 import json
 import logging
+import lzma
 import os
 import re
 import shutil
@@ -417,12 +418,19 @@ def download_kernel(version: str, dest: Path) -> Path:
         capture=True,
     )
     if sig_result.returncode == 0 and sig_path.exists():
-        if not verify_gpg_signature(tarball, sig_path):
-            log.warning(
-                "GPG verification failed — continuing. "
-                "Import kernel.org keys for full "
-                "verification."
-            )
+        # kernel.org signs the uncompressed .tar, not .tar.xz
+        tar_path = tarball.with_suffix("")  # .tar.xz → .tar
+        try:
+            with lzma.open(tarball, "rb") as xz_f, open(tar_path, "wb") as tar_f:
+                shutil.copyfileobj(xz_f, tar_f)
+            if not verify_gpg_signature(tar_path, sig_path):
+                log.warning(
+                    "GPG verification failed — continuing. "
+                    "Import kernel.org keys for full "
+                    "verification."
+                )
+        finally:
+            tar_path.unlink(missing_ok=True)
     else:
         log.info("No GPG signature available — skipping")
 
