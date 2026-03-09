@@ -126,6 +126,14 @@ def _handle_build_output(
 
 def main() -> None:
     """Entry point for the kernel builder CLI."""
+    try:
+        _main_inner()
+    except EOFError:
+        raise SystemExit("EOF received \u2014 aborting") from None
+
+
+def _main_inner() -> None:
+    """Actual CLI logic — main() wraps this for EOFError."""
     setup_logging()
     enforce_locale()
     check_flash_kernel()

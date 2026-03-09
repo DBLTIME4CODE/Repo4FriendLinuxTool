@@ -387,22 +387,15 @@ def safe_extract_tarball(tarball: Path, dest: Path) -> None:
                 member_path.relative_to(dest_resolved)
             except ValueError:
                 raise ValidationError(
-                    "Path traversal detected in tarball "
-                    f"member: {member.name!r}"
+                    f"Path traversal detected in tarball member: {member.name!r}"
                 ) from None
             if member.issym() or member.islnk():
-                link_target = (
-                    dest
-                    / os.path.dirname(member.name)
-                    / member.linkname
-                ).resolve()
+                link_target = (dest / os.path.dirname(member.name) / member.linkname).resolve()
                 try:
                     link_target.relative_to(dest_resolved)
                 except ValueError:
                     raise ValidationError(
-                        "Symlink traversal in tarball: "
-                        f"{member.name!r} -> "
-                        f"{member.linkname!r}"
+                        f"Symlink traversal in tarball: {member.name!r} -> {member.linkname!r}"
                     ) from None
         if sys.version_info >= (3, 12):
             tf.extractall(dest, filter="data")  # noqa: S202
@@ -558,9 +551,7 @@ def build_kernel(
             return
         except subprocess.CalledProcessError:
             if attempt == MAX_RETRIES:
-                raise BuildError(
-                    f"Build failed after {MAX_RETRIES} attempts"
-                ) from None
+                raise BuildError(f"Build failed after {MAX_RETRIES} attempts") from None
             log.warning(
                 "Build failed (attempt %d/%d) — installing deps and retrying ...",
                 attempt,
@@ -594,9 +585,7 @@ def build_deb_package(
             return
         except subprocess.CalledProcessError:
             if attempt == MAX_RETRIES:
-                raise BuildError(
-                    f"Package build failed after {MAX_RETRIES} attempts"
-                ) from None
+                raise BuildError(f"Package build failed after {MAX_RETRIES} attempts") from None
             log.warning(
                 "Package build failed (attempt %d/%d) — installing deps and retrying ...",
                 attempt,
@@ -702,19 +691,17 @@ def numbered_menu(title: str, options: list[str]) -> int:
         except ValueError:
             pass
         except EOFError:
-            raise SystemExit(
-                "EOF received \u2014 aborting menu"
-            ) from None
-        print(
-            f"  Invalid choice \u2014 enter a number "
-            f"between 1 and {len(options)}"
-        )
+            raise SystemExit("EOF received \u2014 aborting menu") from None
+        print(f"  Invalid choice \u2014 enter a number between 1 and {len(options)}")
 
 
 def prompt_yes_no(question: str) -> bool:
     """Prompt with a yes/no question."""
     while True:
-        raw = input(f"{question} [y/n]: ").strip().lower()
+        try:
+            raw = input(f"{question} [y/n]: ").strip().lower()
+        except EOFError:
+            raise SystemExit("EOF received \u2014 aborting prompt") from None
         if raw in ("y", "yes"):
             return True
         if raw in ("n", "no"):
