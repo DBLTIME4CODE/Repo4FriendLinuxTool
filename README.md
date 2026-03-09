@@ -1,97 +1,242 @@
-# MyProject
+# Linux Kernel Builder
 
-Practical Python project scaffold with a Scrum-friendly workflow where you provide priorities and validation, and coding is delegated to the AI assistant.
+A Python CLI tool for downloading, configuring, compiling, and installing Linux kernels from source on Debian/Ubuntu systems.
 
-## Project Goals
+All user interaction is driven by **numbered menus** — no flags to memorize. Build output streams to the terminal in real time, or you can redirect it to a log file.
 
-- Keep a clean, scalable file organization.
-- Standardize quality checks (formatting, linting, tests).
-- Make implementation requests fast and predictable.
-- Keep decision-making and review with you.
+---
 
-## Structure
+## What It Does
 
-```text
-MyProject/
-	.github/
-		copilot-instructions.md
-	.vscode/
-		extensions.json
-		settings.json
-	docs/
-		templates/
-			backlog-item.md
-			sprint-plan.md
-			review-checklist.md
-	scripts/
-		bootstrap.ps1
-		check.ps1
-		run.ps1
-	src/
-		myproject/
-			__init__.py
-			main.py
-			settings.py
-	tests/
-		test_smoke.py
-	.env.example
-	.gitignore
-	pyproject.toml
-	requirements.txt
-	requirements-dev.txt
-	README.md
+| Feature | Details |
+|---------|---------|
+| **Mainline kernel** | Download and build any version from kernel.org, or auto-fetch the latest stable |
+| **Rebuild running kernel** | Detect your running kernel, pull its config from `/boot` or `/proc/config.gz`, rebuild from mainline source |
+| **Ubuntu kernel** | Fetch Ubuntu-patched source via `apt-get source` and build it |
+| **Install or package** | `make install` + `make modules_install`, or generate `.deb` packages with `make bindeb-pkg` |
+| **Input validation** | Strict `[0-9a-zA-Z.-]` whitelist on all user input — no injection possible |
+| **Locale** | Forces `en_US.UTF-8` to avoid encoding issues during builds |
+| **flash-kernel** | Checks for `flash-kernel` at startup (needed on ARM/embedded) |
+| **Kernel signing** | Optional — generate a signing key pair or use your own, signs via in-tree `scripts/sign-file` |
+| **Dependency auto-fix** | If compilation fails due to missing packages, it pauses, installs them via `apt-get`, and retries (up to 3 times) |
+| **Parallel builds** | Auto-calculates `make -j` based on `min(cpu_count, available_ram_gb * 2)` to prevent OOM kills |
+| **ccache** | Auto-detected — if installed, rebuilds go from hours to minutes |
+| **GPG verification** | Best-effort signature check on downloaded kernel tarballs |
+| **Safe extraction** | Tarball extraction validates every member path to prevent directory traversal attacks |
+| **SSRF protection** | Downloads are restricted to `kernel.org` domains only |
+
+---
+
+## Requirements
+
+- **Linux** (Debian/Ubuntu) — uses `apt-get`, `make`, `wget`, `dpkg`, `uname`, `sudo`
+- **Python 3.10+**
+- **Root access** (via `sudo`) for installing deps and the final `make install`
+
+Build dependencies (`build-essential`, `flex`, `bison`, `libssl-dev`, `libelf-dev`, etc.) are **installed automatically** if missing.
+
+---
+
+## Quick Start
+
+```bash
+git clone https://github.com/DBLTIME4CODE/Repo4FriendLinuxTool.git
+cd Repo4FriendLinuxTool
+pip install -e .
+python -m myproject.kernel_cli
 ```
 
-## Quick Start (Windows PowerShell)
+That's it. You'll see:
 
-1. Create and activate virtual environment:
+```
+============================================================
+  Linux Kernel Builder
+============================================================
+  1) Build mainline kernel (specific version)
+  2) Build latest stable kernel from kernel.org
+  3) Rebuild running kernel from source
+  4) Build Ubuntu-patched kernel
+  5) Exit
 
-```powershell
-python -m venv .venv
-.\.venv\Scripts\Activate
+Select an option:
 ```
 
-2. Install dependencies:
+---
 
-```powershell
-pip install -r requirements.txt
-pip install -r requirements-dev.txt
+## Walkthrough: Build the Latest Stable Kernel
+
+```
+Select an option: 2
+Latest stable kernel: 6.12.3
+Build kernel 6.12.3? [y/n]: y
+Build directory [/home/user/kernel-build]:        ← Enter for default
+Redirect build output to a log file? [y/n]: n     ← stream to terminal
+
+Installing packages: build-essential, flex, bison, libssl-dev ...
+
+Downloading https://cdn.kernel.org/pub/linux/kernel/v6.x/linux-6.12.3.tar.xz
+Extracting linux-6.12.3.tar.xz
+
+============================================================
+  Kernel configuration
+============================================================
+  1) Use running kernel's config (olddefconfig)
+  2) Use default config (defconfig)
+  3) Run menuconfig (interactive)
+
+Select an option: 1                               ← copies your running config
+
+Building kernel with 8 parallel jobs ...
+  CC      init/main.o
+  CC      init/version.o
+  ...                                             ← full build output streams here
+
+============================================================
+  Build output
+============================================================
+  1) Compile kernel only (make)
+  2) Generate .deb packages (make bindeb-pkg)
+
+Select an option: 2                               ← generates installable .deb files
+
+Sign the kernel? [y/n]: n
+Done!
 ```
 
-3. Copy and edit environment variables:
+The `.deb` files land in the build directory. Install with:
 
-```powershell
-Copy-Item .env.example .env
+```bash
+sudo dpkg -i ~/kernel-build/linux-image-*.deb ~/kernel-build/linux-headers-*.deb
+sudo reboot
 ```
 
-4. Run checks and tests:
+---
 
-```powershell
-./scripts/check.ps1
+## Walkthrough: Rebuild Your Running Kernel
+
+```
+Select an option: 3
 ```
 
-5. Run app:
+This automatically:
+1. Reads your running version via `uname -r` (e.g. `6.5.0-44-generic`)
+2. Strips the Ubuntu suffix to get the mainline base (`6.5.0`)
+3. Downloads that version from kernel.org
+4. Copies your current `/boot/config-*` as the build config
+5. Runs `make olddefconfig` to update it for the new source
+6. Builds with max parallelism
 
-```powershell
-./scripts/run.ps1
+---
+
+## Walkthrough: Build an Ubuntu Kernel
+
+```
+Select an option: 4
 ```
 
-## Scrum Workflow
+This runs `apt-get source linux-image-$(uname -r)` to fetch the exact Ubuntu-patched source for your running kernel, applies your config, and builds it.
 
-1. Define work item in `docs/templates/backlog-item.md` format.
-2. Ask the assistant to implement the item and include acceptance criteria.
-3. Assistant updates code + tests.
-4. You validate with `./scripts/check.ps1` and review diffs.
-5. Approve or request changes.
+**Note:** Requires `deb-src` lines in `/etc/apt/sources.list`. If missing, add them:
 
-## Common Prompts
+```bash
+sudo sed -i 's/^# deb-src/deb-src/' /etc/apt/sources.list
+sudo apt-get update
+```
 
-- `Implement this backlog item from docs/templates/backlog-item.md and add tests.`
-- `Refactor module X to improve readability without behavior changes.`
-- `Add feature Y and ensure all acceptance criteria pass.`
-- `Review this branch for bugs and missing tests.`
+---
 
-## Notes
+## Kernel Signing
 
-- Use `.github/copilot-instructions.md` to enforce coding conventions for this repository.
-- Keep runtime deps in `requirements.txt` and tooling/test deps in `requirements-dev.txt`.
+When prompted "Sign the kernel?", choosing `y` gives you two options:
+
+1. **Generate a new key pair** — creates `kernel-signing-key.pem` (private, `chmod 600`) and `kernel-signing-cert.pem` using OpenSSL RSA-4096
+2. **Use existing keys** — point it to your own `.pem` files
+
+Signing uses the kernel tree's built-in `scripts/sign-file` tool with SHA-512.
+
+---
+
+## Log File Mode
+
+If you choose to redirect output to a log file, you'll see status messages on screen while the full `make` output goes to the file:
+
+```
+Redirect build output to a log file? [y/n]: y
+Log file path [/home/user/kernel-build/build.log]:
+```
+
+Tail the log in another terminal:
+
+```bash
+tail -f ~/kernel-build/build.log
+```
+
+---
+
+## What Happens When a Build Fails
+
+If `make` fails (missing header, missing tool, etc.), the tool:
+
+1. **Pauses** compilation
+2. Runs `sudo apt-get install` for the full build dependency list
+3. **Retries** `make` from where it left off
+4. Repeats up to **3 times** before giving up
+
+This covers the common case of "I forgot to install `libssl-dev`" without you having to start over.
+
+---
+
+## Programmatic Usage
+
+Skip the menus and call functions directly:
+
+```python
+from pathlib import Path
+from myproject.kernel_builder import (
+    download_kernel,
+    build_kernel,
+    install_kernel,
+    fetch_latest_version,
+    build_deb_package,
+    configure_kernel,
+    extract_running_config,
+)
+
+# Build latest stable and generate .deb packages
+version = fetch_latest_version()                     # "6.12.3"
+source = download_kernel(version, Path("/tmp/kbuild"))
+config = extract_running_config(source)
+configure_kernel(source, config)
+build_deb_package(source, jobs=8)
+```
+
+---
+
+## File Layout
+
+```
+src/myproject/
+├── kernel_builder.py   # Core engine — validation, download, build, install, signing
+├── kernel_cli.py       # Interactive numbered-menu CLI
+└── __init__.py
+
+tests/
+└── test_kernel_builder.py   # 79 unit tests (all mocked — runs on any OS)
+```
+
+---
+
+## Running Tests
+
+```bash
+pip install pytest
+pytest -q
+```
+
+All 79 tests pass. They mock every subprocess call, so they run on Linux, macOS, and Windows without needing root or a network.
+
+---
+
+## License
+
+Do whatever you want with it.
