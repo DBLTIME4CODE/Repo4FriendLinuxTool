@@ -30,7 +30,7 @@ All user interaction is driven by **numbered menus** — no flags to memorize. B
 ## Requirements
 
 - **Linux** (Debian/Ubuntu) — uses `apt-get`, `make`, `wget`, `dpkg`, `uname`, `sudo`
-- **Python 3.10+**
+- **Python 3.10+** (stdlib only — no pip packages required)
 - **Root access** (via `sudo`) for installing deps and the final `make install`
 
 Build dependencies (`build-essential`, `flex`, `bison`, `libssl-dev`, `libelf-dev`, etc.) are **installed automatically** if missing.
@@ -40,13 +40,19 @@ Build dependencies (`build-essential`, `flex`, `bison`, `libssl-dev`, `libelf-de
 ## Quick Start
 
 ```bash
+# 1. Install Python (if not already present)
+sudo apt update && sudo apt install -y python3
+
+# 2. Clone and run
 git clone https://github.com/DBLTIME4CODE/Repo4FriendLinuxTool.git
 cd Repo4FriendLinuxTool
-pip install -e .
-python -m myproject.kernel_cli
+chmod +x run.sh
+./run.sh
 ```
 
-That's it. You'll see:
+There is nothing to `pip install`. The tool uses only the Python standard library.
+
+You'll see:
 
 ```
 ============================================================
@@ -210,18 +216,24 @@ configure_kernel(source, config)
 build_deb_package(source, jobs=8)
 ```
 
+When using as a library, set `PYTHONPATH=src` or install with `pip install -e .`.
+
 ---
 
 ## File Layout
 
 ```
+run.sh                       # Entry point — just run this
+pyproject.toml               # Project metadata (no runtime deps)
 src/myproject/
-├── kernel_builder.py   # Core engine — validation, download, build, install, signing
-├── kernel_cli.py       # Interactive numbered-menu CLI
+├── kernel_builder.py        # Core engine — validation, download,
+│                            #   build, install, signing
+├── kernel_cli.py            # Interactive numbered-menu CLI
 └── __init__.py
 
 tests/
-└── test_kernel_builder.py   # 79 unit tests (all mocked — runs on any OS)
+└── test_kernel_builder.py   # 79 unit tests (all mocked — runs on
+                             #   any OS)
 ```
 
 ---
@@ -229,8 +241,9 @@ tests/
 ## Running Tests
 
 ```bash
-pip install pytest
-pytest -q
+sudo apt install -y python3-pip
+pip install pytest ruff mypy
+PYTHONPATH=src pytest -q
 ```
 
 All 79 tests pass. They mock every subprocess call, so they run on Linux, macOS, and Windows without needing root or a network.

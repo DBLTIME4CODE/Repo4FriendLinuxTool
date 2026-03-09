@@ -265,6 +265,21 @@ Translation: "Pretend `dpkg -s flash-kernel` returned success. Verify the functi
 
 That's why tests run on any OS including Windows.
 
+### Running the tests
+
+```bash
+# One-time setup
+sudo apt install -y python3-pip python3-venv
+python3 -m venv .venv && source .venv/bin/activate
+pip install pytest
+
+# Run
+pytest -q          # all 79 tests — no root, no network
+```
+
+No `pip install -e .` is required — `pyproject.toml` sets
+`pythonpath = ["src"]` so pytest finds the package automatically.
+
 ---
 
 ## Glossary

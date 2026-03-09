@@ -5,16 +5,10 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "myproject"
 version = "0.1.0"
-description = "Scrum-friendly Python project scaffold"
+description = "Interactive Linux kernel builder CLI"
 readme = "README.md"
 requires-python = ">=3.10"
-dependencies = [
-    "python-dotenv>=1.0.1",
-    "playwright>=1.40",
-    "pyyaml>=6.0",
-    "pyautogui>=0.9.54",
-    "pynput>=1.7.6",
-]
+dependencies = []
 
 [tool.setuptools.packages.find]
 where = ["src"]

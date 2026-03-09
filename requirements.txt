@@ -1,7 +1,1 @@
-python-dotenv>=1.0.1
-playwright>=1.40
-pyyaml>=6.0
-pyautogui>=0.9.54
-pynput>=1.7.6
-pyautogui>=0.9.54
-pynput>=1.7.6
+# No runtime dependencies — kernel_builder uses only the Python stdlib.
