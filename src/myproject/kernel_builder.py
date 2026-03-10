@@ -41,6 +41,7 @@ BUILD_DEPS: list[str] = [
     "flex",
     "libssl-dev",
     "libelf-dev",
+    "libdw-dev",
     "bc",
     "dwarves",
     "wget",
