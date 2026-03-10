@@ -14,6 +14,8 @@ import pytest
 
 import myproject.kernel_builder as kb_module
 from myproject.kernel_builder import (
+    KERNEL_ORG_KEYSERVER,
+    KERNEL_ORG_KEYSERVER_FALLBACK,
     KERNEL_ORG_SIGNING_KEYS,
     MAX_INPUT_LENGTH,
     MAX_RETRIES,
@@ -862,18 +864,66 @@ class TestEnsureKernelOrgKeys:
         kb_module._gpg_keys_imported = False
 
     @patch("myproject.kernel_builder.run_cmd")
-    def test_success_imports_keys(self, mock_cmd: MagicMock) -> None:
+    def test_keys_already_in_keyring(self, mock_cmd: MagicMock) -> None:
+        """If keys are already present, no keyserver call is made."""
         mock_cmd.return_value = subprocess.CompletedProcess(args=[], returncode=0)
         assert _ensure_kernel_org_keys() is True
         assert kb_module._gpg_keys_imported is True
-        cmd_args = mock_cmd.call_args[0][0]
-        assert cmd_args[0] == "gpg"
-        assert "--recv-keys" in cmd_args
+        # Only gpg --list-keys calls, no --recv-keys
+        for call in mock_cmd.call_args_list:
+            assert "--recv-keys" not in call[0][0]
+
+    @patch("myproject.kernel_builder.run_cmd")
+    def test_success_imports_keys_from_primary(self, mock_cmd: MagicMock) -> None:
+        """Keys not present locally → import from primary keyserver → verify."""
+
+        def side_effect(cmd: list[str], **kwargs):
+            if "--list-keys" in cmd:
+                # First round: keys not present; after import: present
+                if mock_cmd.call_count <= len(KERNEL_ORG_SIGNING_KEYS):
+                    return subprocess.CompletedProcess(args=cmd, returncode=2)
+                return subprocess.CompletedProcess(args=cmd, returncode=0)
+            if "--recv-keys" in cmd:
+                return subprocess.CompletedProcess(args=cmd, returncode=0)
+            return subprocess.CompletedProcess(args=cmd, returncode=0)
+
+        mock_cmd.side_effect = side_effect
+        assert _ensure_kernel_org_keys() is True
+        assert kb_module._gpg_keys_imported is True
+        recv_calls = [c for c in mock_cmd.call_args_list if "--recv-keys" in c[0][0]]
+        assert len(recv_calls) == 1
+        cmd_args = recv_calls[0][0][0]
+        assert KERNEL_ORG_KEYSERVER in cmd_args
         for key_id in KERNEL_ORG_SIGNING_KEYS:
             assert key_id in cmd_args
 
     @patch("myproject.kernel_builder.run_cmd")
-    def test_failure_does_not_crash(self, mock_cmd: MagicMock) -> None:
+    def test_fallback_keyserver_used(self, mock_cmd: MagicMock) -> None:
+        """Primary returns incomplete keys → falls back to pgp.mit.edu."""
+        call_count = {"recv": 0}
+
+        def side_effect(cmd: list[str], **kwargs):
+            if "--list-keys" in cmd:
+                # Keys not present until after fallback import
+                if call_count["recv"] < 2:
+                    return subprocess.CompletedProcess(args=cmd, returncode=2)
+                return subprocess.CompletedProcess(args=cmd, returncode=0)
+            if "--recv-keys" in cmd:
+                call_count["recv"] += 1
+                return subprocess.CompletedProcess(args=cmd, returncode=0)
+            return subprocess.CompletedProcess(args=cmd, returncode=0)
+
+        mock_cmd.side_effect = side_effect
+        assert _ensure_kernel_org_keys() is True
+        assert kb_module._gpg_keys_imported is True
+        recv_calls = [c for c in mock_cmd.call_args_list if "--recv-keys" in c[0][0]]
+        assert len(recv_calls) == 2
+        assert KERNEL_ORG_KEYSERVER in recv_calls[0][0][0]
+        assert KERNEL_ORG_KEYSERVER_FALLBACK in recv_calls[1][0][0]
+
+    @patch("myproject.kernel_builder.run_cmd")
+    def test_all_keyservers_fail(self, mock_cmd: MagicMock) -> None:
+        """Both keyservers fail → returns False."""
         mock_cmd.return_value = subprocess.CompletedProcess(
             args=[],
             returncode=2,
@@ -887,7 +937,11 @@ class TestEnsureKernelOrgKeys:
         mock_cmd.return_value = subprocess.CompletedProcess(args=[], returncode=0)
         assert _ensure_kernel_org_keys() is True
         assert _ensure_kernel_org_keys() is True
-        mock_cmd.assert_called_once()
+        # Second call is a no-op — uses cached flag
+        # First call: list-keys checks (keys already present path)
+        first_call_count = mock_cmd.call_count
+        _ensure_kernel_org_keys()
+        assert mock_cmd.call_count == first_call_count
 
     @patch("myproject.kernel_builder.run_cmd")
     def test_retries_after_failure(self, mock_cmd: MagicMock) -> None:
@@ -898,10 +952,9 @@ class TestEnsureKernelOrgKeys:
             stderr="timeout",
         )
         assert _ensure_kernel_org_keys() is False
-        # Second attempt succeeds
+        # Second attempt succeeds (keys now present)
         mock_cmd.return_value = subprocess.CompletedProcess(args=[], returncode=0)
         assert _ensure_kernel_org_keys() is True
-        assert mock_cmd.call_count == 2
 
 
 # ===================================================================

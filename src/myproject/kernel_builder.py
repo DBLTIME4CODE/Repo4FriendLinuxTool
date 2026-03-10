@@ -69,7 +69,8 @@ KERNEL_ORG_SIGNING_KEYS: tuple[str, ...] = (
     "647F28654894E3BD457199BE38DBBDC86092693E",  # Greg Kroah-Hartman
     "ABAF11C65A2970B130ABE3C479BE3E4300411886",  # Linus Torvalds
 )
-KERNEL_ORG_KEYSERVER: str = "hkps://keys.openpgp.org"
+KERNEL_ORG_KEYSERVER: str = "hkps://keyserver.ubuntu.com"
+KERNEL_ORG_KEYSERVER_FALLBACK: str = "hkps://pgp.mit.edu"
 
 _gpg_keys_imported: bool = False
 
@@ -389,33 +390,47 @@ def verify_checksum(
     log.info("SHA-256 verified for %s", file_path.name)
 
 
+def _gpg_key_present(fingerprint: str) -> bool:
+    """Check if a GPG key is actually in the local keyring."""
+    result = run_cmd(["gpg", "--list-keys", fingerprint], check=False, capture=True)
+    return result.returncode == 0
+
+
 def _ensure_kernel_org_keys() -> bool:
     """Import kernel.org GPG signing keys if not already imported this session."""
     global _gpg_keys_imported  # noqa: PLW0603
     if _gpg_keys_imported:
         return True
-    log.info("Importing kernel.org signing keys from %s", KERNEL_ORG_KEYSERVER)
-    result = run_cmd(
-        [
-            "gpg",
-            "--keyserver",
-            KERNEL_ORG_KEYSERVER,
-            "--keyserver-options",
-            "timeout=10",
-            "--recv-keys",
-            *KERNEL_ORG_SIGNING_KEYS,
-        ],
-        check=False,
-        capture=True,
-    )
-    if result.returncode == 0:
+
+    # Check if keys are already present
+    if all(_gpg_key_present(fp) for fp in KERNEL_ORG_SIGNING_KEYS):
         _gpg_keys_imported = True
-        log.info("Kernel.org signing keys imported successfully")
+        log.debug("Kernel.org signing keys already in keyring")
         return True
-    log.warning(
-        "Could not import kernel.org signing keys (keyserver may be down): %s",
-        result.stderr.strip() if result.stderr else "unknown error",
-    )
+
+    # Try primary then fallback keyserver
+    for keyserver in (KERNEL_ORG_KEYSERVER, KERNEL_ORG_KEYSERVER_FALLBACK):
+        log.info("Importing kernel.org signing keys from %s", keyserver)
+        result = run_cmd(
+            [
+                "gpg",
+                "--keyserver",
+                keyserver,
+                "--keyserver-options",
+                "timeout=10",
+                "--recv-keys",
+                *KERNEL_ORG_SIGNING_KEYS,
+            ],
+            check=False,
+            capture=True,
+        )
+        if result.returncode == 0 and all(_gpg_key_present(fp) for fp in KERNEL_ORG_SIGNING_KEYS):
+            _gpg_keys_imported = True
+            log.info("Kernel.org signing keys imported successfully")
+            return True
+        log.warning("Keyserver %s failed or returned incomplete keys", keyserver)
+
+    log.warning("Could not import kernel.org signing keys from any keyserver")
     return False
 
 
