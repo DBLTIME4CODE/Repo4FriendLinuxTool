@@ -837,8 +837,32 @@ class TestInstallKernel:
 
 
 class TestSignKernel:
-    def test_missing_sign_tool_raises(self, tmp_path: Path) -> None:
-        with pytest.raises(FileNotFoundError, match="Sign tool"):
+    @patch("myproject.kernel_builder.run_cmd")
+    def test_missing_sign_tool_compiles_it(self, mock_cmd: MagicMock, tmp_path: Path) -> None:
+        """When sign-file is absent, sign_kernel should run make to build it."""
+        scripts = tmp_path / "scripts"
+        scripts.mkdir()
+        (tmp_path / "vmlinux").touch()
+
+        # Simulate make creating the sign-file binary
+        def _fake_make(cmd: list[str], **kwargs: object) -> None:
+            (scripts / "sign-file").touch()
+
+        mock_cmd.side_effect = _fake_make
+
+        sign_kernel(tmp_path, Path("key.pem"), Path("cert.pem"))
+
+        # First call should be the make invocation
+        make_call = mock_cmd.call_args_list[0]
+        assert make_call[0][0] == ["make", "scripts/sign-file"]
+        assert make_call[1]["cwd"] == tmp_path
+
+    @patch("myproject.kernel_builder.run_cmd")
+    def test_missing_sign_tool_raises_after_failed_build(
+        self, mock_cmd: MagicMock, tmp_path: Path
+    ) -> None:
+        """If make doesn't produce sign-file, raise with a helpful message."""
+        with pytest.raises(FileNotFoundError, match="Could not build sign tool"):
             sign_kernel(
                 tmp_path,
                 Path("key.pem"),

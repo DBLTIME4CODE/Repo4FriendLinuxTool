@@ -858,7 +858,13 @@ def sign_kernel(
     """Sign kernel using in-tree ``scripts/sign-file``."""
     sign_tool = source_dir / "scripts" / "sign-file"
     if not sign_tool.exists():
-        raise FileNotFoundError(f"Sign tool not found: {sign_tool}")
+        log.info("Building sign-file tool ...")
+        run_cmd(["make", "scripts/sign-file"], cwd=source_dir)
+        if not sign_tool.exists():
+            raise FileNotFoundError(
+                f"Could not build sign tool at {sign_tool} — "
+                "ensure kernel source is configured and build-essential is installed"
+            )
 
     vmlinux = source_dir / "vmlinux"
     if not vmlinux.exists():
