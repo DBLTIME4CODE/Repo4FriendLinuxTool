@@ -14,8 +14,6 @@ import pytest
 
 import myproject.kernel_builder as kb_module
 from myproject.kernel_builder import (
-    KERNEL_ORG_KEYSERVER,
-    KERNEL_ORG_KEYSERVER_FALLBACK,
     KERNEL_ORG_SIGNING_KEYS,
     MAX_INPUT_LENGTH,
     MAX_RETRIES,
@@ -27,6 +25,7 @@ from myproject.kernel_builder import (
     _kernel_sig_url,
     _kernel_url,
     _normalize_kernel_version,
+    _parse_missing_deps,
     _sanitize_cert_configs,
     build_deb_package,
     build_kernel,
@@ -703,19 +702,41 @@ class TestBuildDebPackage:
 
     @patch("myproject.kernel_builder.install_packages")
     @patch("myproject.kernel_builder.run_cmd")
-    def test_retry_on_failure(
+    def test_retry_parses_missing_deps(
         self,
         mock_cmd: MagicMock,
         mock_install: MagicMock,
         tmp_path: Path,
     ) -> None:
+        """On failure with dpkg-checkbuilddeps error, installs parsed deps."""
+        exc = subprocess.CalledProcessError(2, "make")
+        exc.stderr = (
+            "dpkg-checkbuilddeps: error: Unmet build dependencies: libdw-dev:native libfoo:native"
+        )
+        mock_cmd.side_effect = [
+            exc,
+            subprocess.CompletedProcess(args=["make"], returncode=0),
+        ]
+        build_deb_package(tmp_path, jobs=2)
+        mock_install.assert_called_once_with(["libdw-dev", "libfoo"])
+
+    @patch("myproject.kernel_builder.install_packages")
+    @patch("myproject.kernel_builder.run_cmd")
+    def test_retry_falls_back_to_build_deps(
+        self,
+        mock_cmd: MagicMock,
+        mock_install: MagicMock,
+        tmp_path: Path,
+    ) -> None:
+        """No parseable stderr → falls back to full BUILD_DEPS list."""
         mock_cmd.side_effect = [
             subprocess.CalledProcessError(2, "make"),
             subprocess.CompletedProcess(args=["make"], returncode=0),
         ]
         build_deb_package(tmp_path, jobs=2)
-        assert mock_install.called
-        assert mock_cmd.call_count == 2
+        from myproject.kernel_builder import BUILD_DEPS
+
+        mock_install.assert_called_once_with(BUILD_DEPS)
 
     @patch("myproject.kernel_builder.install_packages")
     @patch("myproject.kernel_builder.run_cmd")
@@ -864,66 +885,66 @@ class TestEnsureKernelOrgKeys:
         kb_module._gpg_keys_imported = False
 
     @patch("myproject.kernel_builder.run_cmd")
-    def test_keys_already_in_keyring(self, mock_cmd: MagicMock) -> None:
-        """If keys are already present, no keyserver call is made."""
-        mock_cmd.return_value = subprocess.CompletedProcess(args=[], returncode=0)
+    def test_any_key_already_in_keyring(self, mock_cmd: MagicMock) -> None:
+        """If ANY key is already present, no keyserver call is made."""
+        # First key present, second not — still succeeds
+        mock_cmd.side_effect = [
+            subprocess.CompletedProcess(args=[], returncode=0),  # list-keys key0 → found
+        ]
         assert _ensure_kernel_org_keys() is True
         assert kb_module._gpg_keys_imported is True
-        # Only gpg --list-keys calls, no --recv-keys
         for call in mock_cmd.call_args_list:
             assert "--recv-keys" not in call[0][0]
 
     @patch("myproject.kernel_builder.run_cmd")
-    def test_success_imports_keys_from_primary(self, mock_cmd: MagicMock) -> None:
-        """Keys not present locally → import from primary keyserver → verify."""
+    def test_imports_keys_individually(self, mock_cmd: MagicMock) -> None:
+        """Keys not present → imports each individually → any present → True."""
+        call_index = {"n": 0}
 
         def side_effect(cmd: list[str], **kwargs):
+            call_index["n"] += 1
             if "--list-keys" in cmd:
-                # First round: keys not present; after import: present
-                if mock_cmd.call_count <= len(KERNEL_ORG_SIGNING_KEYS):
+                # Initial any() check: both missing
+                # Post-import checks: first key present, second not
+                if call_index["n"] <= len(KERNEL_ORG_SIGNING_KEYS):
                     return subprocess.CompletedProcess(args=cmd, returncode=2)
-                return subprocess.CompletedProcess(args=cmd, returncode=0)
+                # After imports, first key present
+                if KERNEL_ORG_SIGNING_KEYS[0] in cmd:
+                    return subprocess.CompletedProcess(args=cmd, returncode=0)
+                return subprocess.CompletedProcess(args=cmd, returncode=2)
             if "--recv-keys" in cmd:
-                return subprocess.CompletedProcess(args=cmd, returncode=0)
+                # First key import succeeds, second fails
+                if KERNEL_ORG_SIGNING_KEYS[0] in cmd:
+                    return subprocess.CompletedProcess(args=cmd, returncode=0)
+                return subprocess.CompletedProcess(args=cmd, returncode=2)
             return subprocess.CompletedProcess(args=cmd, returncode=0)
 
         mock_cmd.side_effect = side_effect
         assert _ensure_kernel_org_keys() is True
         assert kb_module._gpg_keys_imported is True
+        # Each key should have its own --recv-keys call (individual import)
         recv_calls = [c for c in mock_cmd.call_args_list if "--recv-keys" in c[0][0]]
-        assert len(recv_calls) == 1
-        cmd_args = recv_calls[0][0][0]
-        assert KERNEL_ORG_KEYSERVER in cmd_args
-        for key_id in KERNEL_ORG_SIGNING_KEYS:
-            assert key_id in cmd_args
+        for call in recv_calls:
+            # Only one key per call (individual import)
+            keys_in_call = [arg for arg in call[0][0] if len(arg) == 40 and arg.isalnum()]
+            assert len(keys_in_call) == 1
 
     @patch("myproject.kernel_builder.run_cmd")
-    def test_fallback_keyserver_used(self, mock_cmd: MagicMock) -> None:
-        """Primary returns incomplete keys → falls back to pgp.mit.edu."""
-        call_count = {"recv": 0}
-
-        def side_effect(cmd: list[str], **kwargs):
-            if "--list-keys" in cmd:
-                # Keys not present until after fallback import
-                if call_count["recv"] < 2:
-                    return subprocess.CompletedProcess(args=cmd, returncode=2)
-                return subprocess.CompletedProcess(args=cmd, returncode=0)
-            if "--recv-keys" in cmd:
-                call_count["recv"] += 1
-                return subprocess.CompletedProcess(args=cmd, returncode=0)
-            return subprocess.CompletedProcess(args=cmd, returncode=0)
-
-        mock_cmd.side_effect = side_effect
-        assert _ensure_kernel_org_keys() is True
-        assert kb_module._gpg_keys_imported is True
-        recv_calls = [c for c in mock_cmd.call_args_list if "--recv-keys" in c[0][0]]
-        assert len(recv_calls) == 2
-        assert KERNEL_ORG_KEYSERVER in recv_calls[0][0][0]
-        assert KERNEL_ORG_KEYSERVER_FALLBACK in recv_calls[1][0][0]
+    def test_no_fallback_keyserver(self, mock_cmd: MagicMock) -> None:
+        """pgp.mit.edu must never be contacted."""
+        mock_cmd.return_value = subprocess.CompletedProcess(
+            args=[],
+            returncode=2,
+            stderr="timeout",
+        )
+        _ensure_kernel_org_keys()
+        for call in mock_cmd.call_args_list:
+            cmd_str = " ".join(call[0][0])
+            assert "pgp.mit.edu" not in cmd_str
 
     @patch("myproject.kernel_builder.run_cmd")
     def test_all_keyservers_fail(self, mock_cmd: MagicMock) -> None:
-        """Both keyservers fail → returns False."""
+        """All key imports fail → returns False."""
         mock_cmd.return_value = subprocess.CompletedProcess(
             args=[],
             returncode=2,
@@ -937,8 +958,6 @@ class TestEnsureKernelOrgKeys:
         mock_cmd.return_value = subprocess.CompletedProcess(args=[], returncode=0)
         assert _ensure_kernel_org_keys() is True
         assert _ensure_kernel_org_keys() is True
-        # Second call is a no-op — uses cached flag
-        # First call: list-keys checks (keys already present path)
         first_call_count = mock_cmd.call_count
         _ensure_kernel_org_keys()
         assert mock_cmd.call_count == first_call_count
@@ -952,9 +971,37 @@ class TestEnsureKernelOrgKeys:
             stderr="timeout",
         )
         assert _ensure_kernel_org_keys() is False
-        # Second attempt succeeds (keys now present)
         mock_cmd.return_value = subprocess.CompletedProcess(args=[], returncode=0)
         assert _ensure_kernel_org_keys() is True
+
+
+# ===================================================================
+# _parse_missing_deps
+# ===================================================================
+
+
+class TestParseMissingDeps:
+    def test_parses_single_dep(self) -> None:
+        stderr = "dpkg-checkbuilddeps: error: Unmet build dependencies: libdw-dev:native"
+        assert _parse_missing_deps(stderr) == ["libdw-dev"]
+
+    def test_parses_multiple_deps(self) -> None:
+        stderr = (
+            "dpkg-checkbuilddeps: error: Unmet build dependencies: "
+            "libdw-dev:native libfoo:native libbar"
+        )
+        assert _parse_missing_deps(stderr) == ["libdw-dev", "libfoo", "libbar"]
+
+    def test_strips_version_constraints(self) -> None:
+        stderr = "dpkg-checkbuilddeps: error: Unmet build dependencies: libdw-dev (>= 0.158)"
+        assert _parse_missing_deps(stderr) == ["libdw-dev"]
+
+    def test_returns_empty_for_unrelated_output(self) -> None:
+        stderr = "make[1]: *** [Makefile:1234: vmlinux] Error 2"
+        assert _parse_missing_deps(stderr) == []
+
+    def test_returns_empty_for_empty_string(self) -> None:
+        assert _parse_missing_deps("") == []
 
 
 # ===================================================================

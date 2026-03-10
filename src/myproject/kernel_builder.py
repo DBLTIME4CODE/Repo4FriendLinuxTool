@@ -71,7 +71,6 @@ KERNEL_ORG_SIGNING_KEYS: tuple[str, ...] = (
     "ABAF11C65A2970B130ABE3C479BE3E4300411886",  # Linus Torvalds
 )
 KERNEL_ORG_KEYSERVER: str = "hkps://keyserver.ubuntu.com"
-KERNEL_ORG_KEYSERVER_FALLBACK: str = "hkps://pgp.mit.edu"
 
 _gpg_keys_imported: bool = False
 
@@ -398,40 +397,58 @@ def _gpg_key_present(fingerprint: str) -> bool:
 
 
 def _ensure_kernel_org_keys() -> bool:
-    """Import kernel.org GPG signing keys if not already imported this session."""
+    """Import kernel.org GPG signing keys if not already imported this session.
+
+    Keys are imported individually so one missing key doesn't block the
+    others.  Success requires ANY key present — only one key signs each
+    release.
+    """
     global _gpg_keys_imported  # noqa: PLW0603
     if _gpg_keys_imported:
         return True
 
-    # Check if keys are already present
-    if all(_gpg_key_present(fp) for fp in KERNEL_ORG_SIGNING_KEYS):
+    # Check if ANY signing key is already present
+    if any(_gpg_key_present(fp) for fp in KERNEL_ORG_SIGNING_KEYS):
         _gpg_keys_imported = True
-        log.debug("Kernel.org signing keys already in keyring")
+        log.debug("Kernel.org signing key(s) already in keyring")
         return True
 
-    # Try primary then fallback keyserver
-    for keyserver in (KERNEL_ORG_KEYSERVER, KERNEL_ORG_KEYSERVER_FALLBACK):
-        log.info("Importing kernel.org signing keys from %s", keyserver)
+    # Import each key individually from primary keyserver only
+    imported_any = False
+    for fp in KERNEL_ORG_SIGNING_KEYS:
+        if _gpg_key_present(fp):
+            imported_any = True
+            continue
+        log.info(
+            "Importing kernel.org key %s...%s from %s",
+            fp[:8],
+            fp[-4:],
+            KERNEL_ORG_KEYSERVER,
+        )
         result = run_cmd(
             [
                 "gpg",
                 "--keyserver",
-                keyserver,
+                KERNEL_ORG_KEYSERVER,
                 "--keyserver-options",
                 "timeout=10",
                 "--recv-keys",
-                *KERNEL_ORG_SIGNING_KEYS,
+                fp,
             ],
             check=False,
             capture=True,
         )
-        if result.returncode == 0 and all(_gpg_key_present(fp) for fp in KERNEL_ORG_SIGNING_KEYS):
-            _gpg_keys_imported = True
-            log.info("Kernel.org signing keys imported successfully")
-            return True
-        log.warning("Keyserver %s failed or returned incomplete keys", keyserver)
+        if result.returncode == 0 and _gpg_key_present(fp):
+            imported_any = True
+        else:
+            log.warning("Could not import key %s...%s", fp[:8], fp[-4:])
 
-    log.warning("Could not import kernel.org signing keys from any keyserver")
+    if imported_any or any(_gpg_key_present(fp) for fp in KERNEL_ORG_SIGNING_KEYS):
+        _gpg_keys_imported = True
+        log.info("Kernel.org signing key(s) available")
+        return True
+
+    log.warning("No kernel.org signing keys available — GPG verification will be skipped")
     return False
 
 
@@ -679,6 +696,31 @@ def build_kernel(
             ensure_build_deps()
 
 
+def _parse_missing_deps(stderr: str) -> list[str]:
+    """Extract package names from ``dpkg-checkbuilddeps`` error output."""
+    for line in stderr.splitlines():
+        if "Unmet build dependencies:" in line:
+            deps_part = line.split("Unmet build dependencies:", 1)[1].strip()
+            packages: list[str] = []
+            for token in deps_part.split():
+                pkg = token.split(":")[0].strip("(").strip(")")
+                if (
+                    pkg
+                    and not pkg[0].isdigit()
+                    and pkg
+                    not in (
+                        ">=",
+                        "<=",
+                        ">>",
+                        "<<",
+                        "=",
+                    )
+                ):
+                    packages.append(pkg)
+            return packages
+    return []
+
+
 def build_deb_package(
     source_dir: Path,
     jobs: int | None = None,
@@ -702,7 +744,7 @@ def build_deb_package(
             else:
                 run_cmd(cmd, cwd=source_dir, env=env)
             return
-        except subprocess.CalledProcessError:
+        except subprocess.CalledProcessError as exc:
             if attempt == MAX_RETRIES:
                 raise BuildError(f"Package build failed after {MAX_RETRIES} attempts") from None
             log.warning(
@@ -710,7 +752,13 @@ def build_deb_package(
                 attempt,
                 MAX_RETRIES,
             )
-            install_packages(BUILD_DEPS)
+            # Try to parse specific missing deps from error output
+            missing = _parse_missing_deps(getattr(exc, "stderr", "") or "")
+            if missing:
+                log.info("Detected missing deps: %s", ", ".join(missing))
+                install_packages(missing)
+            else:
+                install_packages(BUILD_DEPS)
 
 
 def install_kernel(source_dir: Path) -> None:
