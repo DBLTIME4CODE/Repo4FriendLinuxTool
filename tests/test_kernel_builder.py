@@ -487,12 +487,12 @@ class TestConfigureKernel:
         configure_kernel(tmp_path, config)
         text = (tmp_path / ".config").read_text()
         assert text == "CONFIG_X86=y\n"
-        mock_cmd.assert_called_once()
+        assert mock_cmd.call_count == 2  # olddefconfig runs twice (before + after sanitization)
 
     @patch("myproject.kernel_builder.run_cmd")
     def test_without_config_file(self, mock_cmd: MagicMock, tmp_path: Path) -> None:
         configure_kernel(tmp_path)
-        mock_cmd.assert_called_once()
+        assert mock_cmd.call_count == 2  # olddefconfig runs twice (before + after sanitization)
         assert mock_cmd.call_args[0][0] == ["make", "olddefconfig"]
 
     @patch("myproject.kernel_builder.run_cmd")
@@ -503,7 +503,7 @@ class TestConfigureKernel:
         configure_kernel(tmp_path, dest)
         # File should be unchanged
         assert dest.read_text() == "CONFIG_X86=y\n"
-        mock_cmd.assert_called_once()
+        assert mock_cmd.call_count == 2  # olddefconfig runs twice (before + after sanitization)
 
 
 # ===================================================================
@@ -559,14 +559,54 @@ class TestSanitizeCertConfigs:
         """Gracefully does nothing when .config doesn't exist."""
         _sanitize_cert_configs(tmp_path)  # should not raise
 
+    def test_module_sig_disabled_when_key_cleared(self, tmp_path: Path) -> None:
+        """SIG, SIG_ALL, and SIG_FORCE are disabled when key is cleared."""
+        config = tmp_path / ".config"
+        config.write_text(
+            'CONFIG_MODULE_SIG_KEY="certs/signing_key.pem"\n'
+            "CONFIG_MODULE_SIG=y\n"
+            "CONFIG_MODULE_SIG_ALL=y\n"
+            "CONFIG_MODULE_SIG_FORCE=y\n"
+            "CONFIG_X86=y\n"
+        )
+        _sanitize_cert_configs(tmp_path)
+        result = config.read_text()
+        assert 'CONFIG_MODULE_SIG_KEY=""' in result
+        assert "# CONFIG_MODULE_SIG is not set" in result
+        assert "# CONFIG_MODULE_SIG_ALL is not set" in result
+        assert "# CONFIG_MODULE_SIG_FORCE is not set" in result
+        assert "CONFIG_MODULE_SIG=y" not in result
+        assert "CONFIG_MODULE_SIG_ALL=y" not in result
+        assert "CONFIG_MODULE_SIG_FORCE=y" not in result
+        assert "CONFIG_X86=y" in result
+
+    def test_module_sig_stays_when_key_exists(self, tmp_path: Path) -> None:
+        """Module signing is NOT disabled when the key file exists."""
+        certs_dir = tmp_path / "certs"
+        certs_dir.mkdir()
+        (certs_dir / "signing_key.pem").write_text("key")
+        config = tmp_path / ".config"
+        config.write_text(
+            'CONFIG_MODULE_SIG_KEY="certs/signing_key.pem"\n'
+            "CONFIG_MODULE_SIG=y\n"
+            "CONFIG_MODULE_SIG_ALL=y\n"
+            "CONFIG_X86=y\n"
+        )
+        _sanitize_cert_configs(tmp_path)
+        result = config.read_text()
+        assert 'CONFIG_MODULE_SIG_KEY="certs/signing_key.pem"' in result
+        assert "CONFIG_MODULE_SIG=y" in result
+        assert "CONFIG_MODULE_SIG_ALL=y" in result
+
     @patch("myproject.kernel_builder.run_cmd")
     def test_configure_kernel_calls_sanitize(self, mock_cmd: MagicMock, tmp_path: Path) -> None:
-        """configure_kernel invokes _sanitize_cert_configs after olddefconfig."""
+        """configure_kernel invokes _sanitize_cert_configs between two olddefconfig runs."""
         config = tmp_path / ".config"
         config.write_text('CONFIG_SYSTEM_TRUSTED_KEYS="debian/canonical-certs.pem"\n')
         configure_kernel(tmp_path)
         # After configure_kernel, the missing cert should be cleared
         assert 'CONFIG_SYSTEM_TRUSTED_KEYS=""' in config.read_text()
+        assert mock_cmd.call_count == 2
 
 
 # ===================================================================

@@ -600,6 +600,12 @@ _CERT_CONFIG_RE: re.Pattern[str] = re.compile(
     r'^(CONFIG_SYSTEM_TRUSTED_KEYS|CONFIG_SYSTEM_REVOCATION_KEYS|CONFIG_MODULE_SIG_KEY)="(.+)"$'
 )
 
+_SIG_DISABLE_MAP: dict[str, str] = {
+    "CONFIG_MODULE_SIG=y": "# CONFIG_MODULE_SIG is not set",
+    "CONFIG_MODULE_SIG_ALL=y": "# CONFIG_MODULE_SIG_ALL is not set",
+    "CONFIG_MODULE_SIG_FORCE=y": "# CONFIG_MODULE_SIG_FORCE is not set",
+}
+
 
 def _sanitize_cert_configs(source_dir: Path) -> None:
     """Clear cert/key config values that reference non-existent files.
@@ -618,6 +624,8 @@ def _sanitize_cert_configs(source_dir: Path) -> None:
     changed: list[str] = []
     new_lines: list[str] = []
 
+    sig_key_cleared = False
+
     for line in lines:
         m = _CERT_CONFIG_RE.match(line.rstrip("\n"))
         if m:
@@ -627,8 +635,23 @@ def _sanitize_cert_configs(source_dir: Path) -> None:
                 ending = "\n" if line.endswith("\n") else ""
                 new_lines.append(f'{key}=""{ending}')
                 changed.append(f'{key}={value!r} -> ""')
+                if key == "CONFIG_MODULE_SIG_KEY":
+                    sig_key_cleared = True
                 continue
         new_lines.append(line)
+
+    # Second pass: disable module signing when the signing key was cleared.
+    if sig_key_cleared:
+        for i, line in enumerate(new_lines):
+            stripped = line.rstrip("\n")
+            if stripped in _SIG_DISABLE_MAP:
+                ending = "\n" if line.endswith("\n") else ""
+                new_lines[i] = _SIG_DISABLE_MAP[stripped] + ending
+                changed.append(f"{stripped} -> {_SIG_DISABLE_MAP[stripped]}")
+        log.warning(
+            "Module signing disabled — CONFIG_MODULE_SIG_KEY referenced a "
+            "non-existent file. Use the signing menu to generate your own key."
+        )
 
     if changed:
         config_file.write_text("".join(new_lines), encoding="utf-8")
@@ -652,6 +675,8 @@ def configure_kernel(
             log.info("Config already at %s — skipping copy", dest)
     run_cmd(["make", "olddefconfig"], cwd=source_dir)
     _sanitize_cert_configs(source_dir)
+    # Re-run olddefconfig to resolve kconfig dependencies after sanitization
+    run_cmd(["make", "olddefconfig"], cwd=source_dir)
 
 
 def _make_env() -> dict[str, str] | None:
