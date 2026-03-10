@@ -850,6 +850,50 @@ def generate_signing_key(
     return key_path, cert_path
 
 
+def _compile_sign_tool(source_dir: Path, sign_tool: Path, sign_src: Path) -> None:
+    """Compile ``sign-file`` from source with a two-stage fallback.
+
+    Stage 1: ``cc -o sign-file sign-file.c -lcrypto``
+    Stage 2: ``cc -o sign-file sign-file.c -I include -lcrypto -lssl``
+    """
+    attempts: list[tuple[str, list[str]]] = [
+        (
+            "basic",
+            ["cc", "-o", str(sign_tool), str(sign_src), "-lcrypto"],
+        ),
+        (
+            "extended (-I include, -lssl)",
+            [
+                "cc",
+                "-o",
+                str(sign_tool),
+                str(sign_src),
+                "-I",
+                "include",
+                "-lcrypto",
+                "-lssl",
+            ],
+        ),
+    ]
+    for label, cmd in attempts:
+        log.info("Compiling sign-file (%s) ...", label)
+        try:
+            run_cmd(cmd, cwd=source_dir)
+        except subprocess.CalledProcessError as exc:
+            log.warning("sign-file compilation failed (%s): %s", label, exc)
+            sign_tool.unlink(missing_ok=True)
+            continue
+        if sign_tool.exists():
+            log.info("sign-file compiled successfully (%s)", label)
+            return
+        # cc returned 0 but no binary produced — try next attempt
+        log.warning("cc returned 0 but sign-file not found (%s)", label)
+
+    raise FileNotFoundError(
+        f"Could not compile sign tool at {sign_tool} — ensure libssl-dev is installed"
+    )
+
+
 def sign_kernel(
     source_dir: Path,
     private_key: Path,
@@ -858,13 +902,12 @@ def sign_kernel(
     """Sign kernel using in-tree ``scripts/sign-file``."""
     sign_tool = source_dir / "scripts" / "sign-file"
     if not sign_tool.exists():
-        log.info("Building sign-file tool ...")
-        run_cmd(["make", "scripts/sign-file"], cwd=source_dir)
-        if not sign_tool.exists():
+        sign_src = source_dir / "scripts" / "sign-file.c"
+        if not sign_src.exists():
             raise FileNotFoundError(
-                f"Could not build sign tool at {sign_tool} — "
-                "ensure kernel source is configured and build-essential is installed"
+                f"sign-file source not found at {sign_src} — kernel source tree may be incomplete"
             )
+        _compile_sign_tool(source_dir, sign_tool, sign_src)
 
     vmlinux = source_dir / "vmlinux"
     if not vmlinux.exists():

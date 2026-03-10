@@ -839,30 +839,90 @@ class TestInstallKernel:
 class TestSignKernel:
     @patch("myproject.kernel_builder.run_cmd")
     def test_missing_sign_tool_compiles_it(self, mock_cmd: MagicMock, tmp_path: Path) -> None:
-        """When sign-file is absent, sign_kernel should run make to build it."""
+        """When sign-file is absent, sign_kernel should compile it with cc."""
         scripts = tmp_path / "scripts"
         scripts.mkdir()
+        (scripts / "sign-file.c").write_text("/* stub */")
         (tmp_path / "vmlinux").touch()
 
-        # Simulate make creating the sign-file binary
-        def _fake_make(cmd: list[str], **kwargs: object) -> None:
-            (scripts / "sign-file").touch()
+        # Simulate cc creating the sign-file binary on first attempt
+        def _fake_cc(cmd: list[str], **kwargs: object) -> None:
+            if cmd[0] == "cc":
+                (scripts / "sign-file").touch()
 
-        mock_cmd.side_effect = _fake_make
+        mock_cmd.side_effect = _fake_cc
 
         sign_kernel(tmp_path, Path("key.pem"), Path("cert.pem"))
 
-        # First call should be the make invocation
-        make_call = mock_cmd.call_args_list[0]
-        assert make_call[0][0] == ["make", "scripts/sign-file"]
-        assert make_call[1]["cwd"] == tmp_path
+        # First call should be the basic cc compilation
+        cc_call = mock_cmd.call_args_list[0]
+        assert cc_call[0][0][0] == "cc"
+        assert "-lcrypto" in cc_call[0][0]
+        assert cc_call[1]["cwd"] == tmp_path
 
     @patch("myproject.kernel_builder.run_cmd")
-    def test_missing_sign_tool_raises_after_failed_build(
+    def test_fallback_compile_on_first_failure(self, mock_cmd: MagicMock, tmp_path: Path) -> None:
+        """When basic cc fails, fall back to extended flags."""
+        scripts = tmp_path / "scripts"
+        scripts.mkdir()
+        (scripts / "sign-file.c").write_text("/* stub */")
+        (tmp_path / "vmlinux").touch()
+
+        call_count = 0
+
+        def _fail_first_succeed_second(cmd: list[str], **kwargs: object) -> None:
+            nonlocal call_count
+            if cmd[0] == "cc":
+                call_count += 1
+                if call_count == 1:
+                    raise subprocess.CalledProcessError(1, cmd)
+                (scripts / "sign-file").touch()
+
+        mock_cmd.side_effect = _fail_first_succeed_second
+
+        sign_kernel(tmp_path, Path("key.pem"), Path("cert.pem"))
+
+        # Second cc call should include extended flags
+        cc_calls = [c for c in mock_cmd.call_args_list if c[0][0][0] == "cc"]
+        assert len(cc_calls) == 2
+        assert "-lssl" in cc_calls[1][0][0]
+        assert "-I" in cc_calls[1][0][0]
+
+    @patch("myproject.kernel_builder.run_cmd")
+    def test_missing_sign_tool_raises_after_both_compiles_fail(
         self, mock_cmd: MagicMock, tmp_path: Path
     ) -> None:
-        """If make doesn't produce sign-file, raise with a helpful message."""
-        with pytest.raises(FileNotFoundError, match="Could not build sign tool"):
+        """If both cc attempts fail, raise with a helpful message."""
+        scripts = tmp_path / "scripts"
+        scripts.mkdir()
+        (scripts / "sign-file.c").write_text("/* stub */")
+        mock_cmd.side_effect = subprocess.CalledProcessError(1, ["cc"])
+        with pytest.raises(FileNotFoundError, match="Could not compile sign tool"):
+            sign_kernel(
+                tmp_path,
+                Path("key.pem"),
+                Path("cert.pem"),
+            )
+
+    @patch("myproject.kernel_builder.run_cmd")
+    def test_missing_sign_tool_raises_after_no_binary_produced(
+        self, mock_cmd: MagicMock, tmp_path: Path
+    ) -> None:
+        """If cc returns 0 but no binary produced in both attempts, raise."""
+        scripts = tmp_path / "scripts"
+        scripts.mkdir()
+        (scripts / "sign-file.c").write_text("/* stub */")
+        with pytest.raises(FileNotFoundError, match="Could not compile sign tool"):
+            sign_kernel(
+                tmp_path,
+                Path("key.pem"),
+                Path("cert.pem"),
+            )
+
+    def test_missing_sign_source_raises(self, tmp_path: Path) -> None:
+        """If sign-file.c is missing, raise immediately."""
+        (tmp_path / "scripts").mkdir()
+        with pytest.raises(FileNotFoundError, match="sign-file source not found"):
             sign_kernel(
                 tmp_path,
                 Path("key.pem"),
